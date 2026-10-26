@@ -1,0 +1,72 @@
+name: Build debug APK (PIN)
+
+# Manual trigger only: Actions tab -> "Build debug APK (PIN)" -> Run workflow.
+# Needs no secrets / signing keys. Produces a debug-signed APK and attaches
+# it to a GitHub Release so it can be downloaded directly (also from a phone).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx3g -XX:MaxMetaspaceSize=512m"
+  GRADLE_VERSION: "8.14.5"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4.5.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Add PIN feature to the source
+        run: python3 apply_pin_patch.py
+
+      - name: Install Gradle ${{ env.GRADLE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip
+          mkdir -p "$HOME/gradle" && unzip -q /tmp/gradle.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Generate Gradle wrapper
+        working-directory: LauncherV15
+        run: |
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
+          chmod +x gradlew
+
+      - name: Build debug APK
+        working-directory: LauncherV15
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          set -euo pipefail
+          cp LauncherV15/app/build/outputs/apk/debug/app-debug.apk BareLauncher-PIN.apk
+          ls -lh BareLauncher-PIN.apk
+
+      - name: Upload APK as workflow artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: BareLauncher-PIN-apk
+          path: BareLauncher-PIN.apk
+
+      - name: Publish APK as a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="pin-build-${{ github.run_number }}"
+          gh release create "$TAG" BareLauncher-PIN.apk \
+            --title "BareLauncher + PIN ($TAG)" \
+            --notes "Debug-signed APK with the hidden-apps PIN lock." \
+            --prerelease \
+            --target "${{ github.sha }}"
