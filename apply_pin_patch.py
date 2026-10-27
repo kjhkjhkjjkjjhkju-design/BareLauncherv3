@@ -6,7 +6,8 @@ Adds, on top of the ORIGINAL source (nothing is committed to the repo):
   * PinLock.java        - PIN pad (remote friendly), app lock list, helpers
   * "Gizlilik" page     - PIN lock, hidden apps, app lock, settings lock
   * app lock            - locked apps ask for the PIN every time they start
-  * settings lock       - optional PIN before the launcher settings open
+  * settings lock       - optional PIN before the launcher settings (and the
+                          gear's long-press system Settings) open
   * Turkish UI          - all texts in res/values/strings.xml + indicators
   * small credit line   - "Duzenleyen: Veysel Alemdar" under the settings list
 
@@ -763,6 +764,19 @@ def main():
                    + m.group(2) + "    showSettingsPanel();\n"
                    + m.group(2) + "}"),
         "gear click")
+
+    # 6b) settings lock also covers the gear's long-press (system Settings) --
+    src = sub_once(
+        src,
+        r"(view\.playSoundEffect\(SoundEffectConstants\.CLICK\);\n)(\s+)openSystemSettings\(\);\n(\s+return true;)",
+        lambda m: (m.group(1)
+                   + m.group(2) + "if (PinLock.settingsLocked(prefs)) {\n"
+                   + m.group(2) + "    PinLock.verify(this, prefs, \"Ayarlar\", this::openSystemSettings);\n"
+                   + m.group(2) + "} else {\n"
+                   + m.group(2) + "    openSystemSettings();\n"
+                   + m.group(2) + "}\n"
+                   + m.group(3)),
+        "gear long-press")
 
     # 7) app lock: every launch goes through one gate ------------------------
     src = sub_once(
