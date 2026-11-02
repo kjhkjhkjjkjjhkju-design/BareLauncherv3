@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-BareLauncher privacy / Turkish patch (run from the repository root).
+BareLauncher patch (run from the repository root). Works on the ORIGINAL
+source at build time; nothing is committed back.
 
-Adds, on top of the ORIGINAL source (nothing is committed to the repo):
-  * PinLock.java        - PIN pad (remote friendly), app lock list, helpers
-  * "Gizlilik" page     - PIN lock, hidden apps, app lock, settings lock
-  * app lock            - locked apps ask for the PIN every time they start
-  * settings lock       - optional PIN before the launcher settings (and the
-                          gear's long-press system Settings) open
-  * Turkish UI          - all texts in res/values/strings.xml + indicators
-  * small credit line   - "Duzenleyen: Veysel Alemdar" under the settings list
+  * PinLock.java : PIN pad, "Gizleme" (lock + hide) list, helpers
+  * Settings     : Gizlilik (PIN, Gizleme, Ayarlar kilidi), Ozellestirme
+                   (Tus kisayollari, Duvar kagidi, Saat) and Diger (Yedekle,
+                   Sistem ayarlari, Hakkinda) pages
+  * Locks        : app lock on every launch, optional settings lock
+  * Long-press   : "Gizle" removed from the app context menu
+  * Icons        : TV (leanback) activity is preferred, so TV banners show
+  * Drawer       : more transparent all-apps background
+  * Turkish UI, small credit line under the settings list
 
-It stops with an error (instead of guessing) if the source differs from what
-it expects, and does nothing if it was already applied.
+Stops with an error (never guesses) if the source differs from expectations;
+does nothing if it was already applied.
 """
 import re
 import sys
@@ -147,9 +149,20 @@ final class PinLock {
         return p == null ? 0 : lockedSet(p).size();
     }
 
-    /** Dialog listing every installed app; OK toggles its lock. */
-    static void showAppLockPicker(final Activity a, final SharedPreferences p,
-                                  List<AppInfo> source, final Runnable onChanged) {
+    /** Lets the launcher hide / unhide apps from the combined list. */
+    interface PrivacyHost {
+        boolean isHidden(String pkg);
+        void setHidden(AppInfo app, boolean hide);
+        void onClosed();
+    }
+
+    /**
+     * "Gizleme" list: every installed app with two switches, "Kilit" (ask for
+     * the PIN on every launch) and "Gizle" (hide from the home screen).
+     * LEFT/RIGHT picks the switch, OK flips it.
+     */
+    static void showPrivacyList(final Activity a, final SharedPreferences p,
+                                List<AppInfo> source, final PrivacyHost host) {
         if (a.isFinishing()) return;
         final ArrayList<AppInfo> apps = new ArrayList<AppInfo>();
         final Set<String> seen = new HashSet<String>();
@@ -162,8 +175,8 @@ final class PinLock {
         final Set<String> locked = lockedSet(p);
         final Dialog d = baseDialog(a);
         LinearLayout box = card(a);
-        box.addView(label(a, "Uygulama kilidi", 15, 0xFFFFFFFF, 2));
-        box.addView(label(a, "OK: kilitle / kilidi kald\u0131r", 12, 0xB3FFFFFF, 6));
+        box.addView(label(a, "Gizleme", 15, 0xFFFFFFFF, 2));
+        box.addView(label(a, "Sol/Sa\u011f: se\u00e7  \u2022  OK: a\u00e7 / kapat", 12, 0xB3FFFFFF, 6));
 
         LinearLayout list = new LinearLayout(a);
         list.setOrientation(LinearLayout.VERTICAL);
@@ -172,32 +185,62 @@ final class PinLock {
             list.addView(label(a, "Uygulama bulunamad\u0131", 13, 0xB3FFFFFF, 6));
         }
         for (final AppInfo ai : apps) {
-            final TextView row = rowButton(a, rowText(ai.label, locked.contains(ai.packageName)));
-            row.setOnClickListener(v -> {
-                boolean now;
-                if (locked.contains(ai.packageName)) { locked.remove(ai.packageName); now = false; }
-                else { locked.add(ai.packageName); now = true; }
+            final String pkg = ai.packageName;
+            LinearLayout row = new LinearLayout(a);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+
+            TextView name = label(a, ai.label, 13, 0xFFFFFFFF, 0);
+            name.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            name.setPadding(dp(a, 6), 0, dp(a, 6), 0);
+            name.setLayoutParams(new LinearLayout.LayoutParams(0, dp(a, 38), 1f));
+            row.addView(name);
+
+            final TextView lockBtn = button(a, "", 80, 34, 12);
+            final TextView hideBtn = button(a, "", 80, 34, 12);
+            setToggle(lockBtn, "Kilit", locked.contains(pkg));
+            setToggle(hideBtn, "Gizle", host.isHidden(pkg));
+            lockBtn.setOnClickListener(v -> {
+                if (!isSet(p)) {
+                    Toast.makeText(a, "\u00d6nce PIN kilidini ayarlay\u0131n", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                boolean now = !locked.contains(pkg);
+                if (now) locked.add(pkg); else locked.remove(pkg);
                 p.edit().putStringSet(K_LOCKED_APPS, new HashSet<String>(locked)).apply();
-                row.setText(rowText(ai.label, now));
-                if (onChanged != null) onChanged.run();
+                setToggle(lockBtn, "Kilit", now);
             });
+            hideBtn.setOnClickListener(v -> {
+                boolean now = !host.isHidden(pkg);
+                host.setHidden(ai, now);
+                setToggle(hideBtn, "Gizle", now);
+            });
+            row.addView(lockBtn);
+            row.addView(hideBtn);
             list.addView(row);
-            if (first == null) first = row;
+            if (first == null) first = lockBtn;
         }
         ScrollView sv = new ScrollView(a);
         sv.addView(list);
-        box.addView(sv, new LinearLayout.LayoutParams(dp(a, 320), dp(a, 230)));
+        box.addView(sv, new LinearLayout.LayoutParams(dp(a, 340), dp(a, 230)));
 
-        TextView close = button(a, "Kapat", 320, 40, 15);
+        TextView close = button(a, "Kapat", 340, 40, 15);
         close.setOnClickListener(v -> d.dismiss());
         box.addView(close);
 
-        present(d, box, 360);
+        d.setOnDismissListener(x -> host.onClosed());
+        present(d, box, 380);
         if (first != null) first.requestFocus(); else close.requestFocus();
     }
 
-    private static String rowText(String label, boolean locked) {
-        return locked ? "\u25cf  " + label + "  \u2014  kilitli" : "\u25cb  " + label;
+    private static void setToggle(TextView t, String name, boolean on) {
+        t.setSelected(on);
+        t.setText((on ? "\u25cf " : "\u25cb ") + name);
+        if (t.getBackground() instanceof GradientDrawable) {
+            paint(t, (GradientDrawable) t.getBackground(), t.isFocused());
+        }
     }
 
     // ── Flows ────────────────────────────────────────────────────────────
@@ -339,8 +382,9 @@ final class PinLock {
     }
 
     private static void paint(TextView t, GradientDrawable bg, boolean focused) {
-        bg.setColor(focused ? 0xFFEFEFEF : 0x22FFFFFF);
-        t.setTextColor(focused ? 0xFF111114 : 0xE6FFFFFF);
+        boolean on = t.isSelected();
+        bg.setColor(focused ? 0xFFEFEFEF : (on ? 0x6638BDF8 : 0x22FFFFFF));
+        t.setTextColor(focused ? 0xFF111114 : (on ? 0xFFFFFFFF : 0xE6FFFFFF));
     }
 
     /** A focusable key / button. Lights up white when focused (remote D-pad). */
@@ -363,14 +407,6 @@ final class PinLock {
         int m = dp(c, 3);
         lp.setMargins(m, m, m, m);
         t.setLayoutParams(lp);
-        return t;
-    }
-
-    /** A focusable list row (left aligned), used by the app-lock list. */
-    private static TextView rowButton(Context c, String text) {
-        TextView t = button(c, text, 320, 40, 14);
-        t.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
-        t.setPadding(dp(c, 12), 0, dp(c, 12), 0);
         return t;
     }
 
@@ -528,7 +564,7 @@ STRINGS_TR = r'''<?xml version="1.0" encoding="utf-8"?>
     <string name="keymap_hide_empty">Gizli uygulama yok</string>
 
     <!-- Ayarlar paneli -->
-    <string name="settings_row_manage_hidden">Gizli uygulamalar</string>
+    <string name="settings_row_manage_hidden">Gizleme</string>
     <string name="settings_row_button_shortcuts">Tuş kısayolları</string>
     <string name="settings_row_set_wallpaper">Duvar kağıdı ayarla</string>
     <string name="settings_row_wallpaper_menu">Duvar kağıdı / Slayt gösterisi</string>
@@ -543,8 +579,9 @@ STRINGS_TR = r'''<?xml version="1.0" encoding="utf-8"?>
     <string name="settings_row_system_settings">Sistem ayarları</string>
     <string name="settings_row_about">Hakkında</string>
     <string name="settings_row_privacy">Gizlilik</string>
+    <string name="settings_row_customize">Özelleştirme</string>
+    <string name="settings_row_other">Diğer</string>
     <string name="settings_row_pin">PIN kilidi</string>
-    <string name="settings_row_app_lock">Uygulama kilidi</string>
     <string name="settings_row_settings_lock">Ayarlar kilidi</string>
 
     <!-- Hakkında -->
@@ -611,9 +648,8 @@ def sub_once(text, pattern, repl, label):
     return new
 
 
-def replace_n(text, old, new, label, minimum=1):
-    n = text.count(old)
-    if n < minimum:
+def replace_n(text, old, new, label):
+    if old not in text:
         sys.exit("PATCH ERROR: '%s' not found" % label)
     return text.replace(old, new)
 
@@ -625,82 +661,82 @@ def main():
         return
     braces_before = src.count("{") - src.count("}")
 
-    # 1) row ids + page id --------------------------------------------------
+    # 1) ids ------------------------------------------------------------
     src = sub_once(
         src, r"(private static final int SR_IDLE_HIDE\s*=\s*13;[^\n]*\n)",
-        lambda m: m.group(1)
-        + "    private static final int SR_PIN            = 14;\n"
-        + "    private static final int SR_PRIVACY_MENU   = 15;   // -> SPAGE_PRIVACY\n"
-        + "    private static final int SR_APP_LOCK        = 16;\n"
-        + "    private static final int SR_SETTINGS_LOCK   = 17;\n",
-        "row ids")
+        lambda m: m.group(1) + r'''    private static final int SR_PIN            = 14;
+    private static final int SR_PRIVACY_MENU   = 15;   // -> SPAGE_PRIVACY
+    private static final int SR_SETTINGS_LOCK  = 17;
+    private static final int SR_CUSTOM_MENU    = 18;   // -> SPAGE_CUSTOM
+    private static final int SR_OTHER_MENU     = 19;   // -> SPAGE_OTHER
+''', "row ids")
     src = sub_once(
         src, r"SPAGE_MAIN = 0, SPAGE_WALLPAPER = 1, SPAGE_BACKUP = 2;",
-        lambda m: "SPAGE_MAIN = 0, SPAGE_WALLPAPER = 1, SPAGE_BACKUP = 2, SPAGE_PRIVACY = 3;",
+        lambda m: "SPAGE_MAIN = 0, SPAGE_WALLPAPER = 1, SPAGE_BACKUP = 2,\n"
+                  "                              SPAGE_PRIVACY = 3, SPAGE_CUSTOM = 4, SPAGE_OTHER = 5;",
         "page ids")
-
-    # 2) main list: one "Gizlilik" row instead of "Manage hidden apps" ------
+    # the pending cursor used to default to row 0 (= "hidden apps", the old
+    # first row); it now has to mean "first row of the main page"
     src = sub_once(
-        src, r"SR_HIDE_APPS, SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK,",
-        lambda m: "SR_PRIVACY_MENU, SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK,",
-        "SROWS_MAIN")
+        src, r"(private int\s+pendingSettingsCursor\s*=\s*)0;",
+        lambda m: m.group(1) + "SR_PRIVACY_MENU;", "pending cursor default")
+
+    # 2) page contents ----------------------------------------------------
+    src = sub_once(
+        src, r"SR_HIDE_APPS, SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK,\s*SR_BACKUP_MENU, SR_SYSTEM, SR_ABOUT",
+        lambda m: "SR_PRIVACY_MENU, SR_CUSTOM_MENU, SR_OTHER_MENU", "SROWS_MAIN")
     src = sub_once(
         src, r"(    private static final int\[\] SROWS_WALLPAPER = \{)",
-        lambda m: ("    private static final int[] SROWS_PRIVACY = {\n"
-                   "            SR_PIN, SR_HIDE_APPS, SR_APP_LOCK, SR_SETTINGS_LOCK };\n"
-                   + m.group(1)),
-        "SROWS_PRIVACY")
+        lambda m: r'''    private static final int[] SROWS_PRIVACY = {
+            SR_PIN, SR_HIDE_APPS, SR_SETTINGS_LOCK };
+    private static final int[] SROWS_CUSTOM = {
+            SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK };
+    private static final int[] SROWS_OTHER = {
+            SR_BACKUP_MENU, SR_SYSTEM, SR_ABOUT };
+''' + m.group(1), "new page arrays")
     src = sub_once(
         src, r"(            case SPAGE_WALLPAPER: return SROWS_WALLPAPER;\n)",
-        lambda m: "            case SPAGE_PRIVACY:   return SROWS_PRIVACY;\n" + m.group(1),
+        lambda m: "            case SPAGE_PRIVACY:   return SROWS_PRIVACY;\n"
+                  "            case SPAGE_CUSTOM:    return SROWS_CUSTOM;\n"
+                  "            case SPAGE_OTHER:     return SROWS_OTHER;\n" + m.group(1),
         "page rows switch")
 
-    # 3) labels -------------------------------------------------------------
+    # 3) labels -----------------------------------------------------------
     src = sub_once(
         src,
         r"(            case SR_HIDE_APPS:\s+return R\.string\.settings_row_manage_hidden;\n)",
-        lambda m: m.group(1)
-        + "            case SR_PRIVACY_MENU:       return R.string.settings_row_privacy;\n"
-        + "            case SR_PIN:                return R.string.settings_row_pin;\n"
-        + "            case SR_APP_LOCK:           return R.string.settings_row_app_lock;\n"
-        + "            case SR_SETTINGS_LOCK:      return R.string.settings_row_settings_lock;\n",
-        "row labels")
+        lambda m: m.group(1) + r'''            case SR_PRIVACY_MENU:       return R.string.settings_row_privacy;
+            case SR_CUSTOM_MENU:        return R.string.settings_row_customize;
+            case SR_OTHER_MENU:         return R.string.settings_row_other;
+            case SR_PIN:                return R.string.settings_row_pin;
+            case SR_SETTINGS_LOCK:      return R.string.settings_row_settings_lock;
+''', "row labels")
 
-    # 4) right-side state indicators for the new rows -----------------------
+    # 4) state indicators for PIN / settings lock ------------------------------
     src = sub_once(
         src, r"(return rowId == SR_CLOCK\n)",
-        lambda m: m.group(1)
-        + "            || rowId == SR_PIN\n"
-        + "            || rowId == SR_APP_LOCK\n"
-        + "            || rowId == SR_SETTINGS_LOCK\n",
+        lambda m: m.group(1) + "            || rowId == SR_PIN\n"
+                               "            || rowId == SR_SETTINGS_LOCK\n",
         "indicator rows")
     src = sub_once(
         src, r'(            case SR_SLIDESHOW_FOLDER:   return "Not set";\n)',
-        lambda m: m.group(1)
-        + '            case SR_PIN:                return "Ayarl\\u0131";\n'
-        + '            case SR_APP_LOCK:           return "99 uyg.";\n'
-        + '            case SR_SETTINGS_LOCK:      return "Kapal\\u0131";\n',
-        "indicator widest text")
+        lambda m: m.group(1) + r'''            case SR_PIN:                return "Ayarl\u0131";
+            case SR_SETTINGS_LOCK:      return "Kapal\u0131";
+''', "indicator widest text")
     src = sub_once(
         src,
         r"(                \} else \{\n\s+ind\.setTextColor\(sel \? selTx : idleTx\);)",
-        lambda m: (
-            "                } else if (rowId == SR_PIN) {\n"
-            "                    boolean pinOn = PinLock.isSet(prefs);\n"
-            "                    ind.setText(pinOn ? \"Ayarl\\u0131\" : \"Yok\");\n"
-            "                    ind.setTextColor(pinOn ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));\n"
-            "                } else if (rowId == SR_APP_LOCK) {\n"
-            "                    int lockedN = PinLock.lockedCount(prefs);\n"
-            "                    ind.setText(lockedN > 0 ? (lockedN + \" uyg.\") : \"Yok\");\n"
-            "                    ind.setTextColor(lockedN > 0 ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));\n"
-            "                } else if (rowId == SR_SETTINGS_LOCK) {\n"
-            "                    boolean setLockOn = prefs.getBoolean(PinLock.K_LOCK_SETTINGS, false);\n"
-            "                    ind.setText(setLockOn ? \"A\\u00e7\\u0131k\" : \"Kapal\\u0131\");\n"
-            "                    ind.setTextColor(setLockOn ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));\n"
-            + m.group(1)),
-        "indicator refresh")
+        lambda m: r'''                } else if (rowId == SR_PIN) {
+                    boolean pinOn = PinLock.isSet(prefs);
+                    ind.setText(pinOn ? "Ayarl\u0131" : "Yok");
+                    ind.setTextColor(pinOn ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
+                } else if (rowId == SR_SETTINGS_LOCK) {
+                    boolean setLockOn = prefs.getBoolean(PinLock.K_LOCK_SETTINGS, false);
+                    ind.setText(setLockOn ? "A\u00e7\u0131k" : "Kapal\u0131");
+                    ind.setTextColor(setLockOn ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
+''' + m.group(1), "indicator refresh")
 
-    # 5) row actions --------------------------------------------------------
+    # 5) row actions -----------------------------------------------------------
     old_case = (
         r"            case SR_HIDE_APPS:\n"
         r"\s*// Hand off to the keymap card's HIDE mode \(returns here on Back\)\.\n"
@@ -711,49 +747,156 @@ def main():
         r"\s*showKeymapOverlay\(\);\n"
         r"\s*enterHideManager\(\);\n"
         r"\s*break;\n")
-    new_case = (
-        "            case SR_HIDE_APPS:\n"
-        "                // Already behind the PIN-protected Privacy page.\n"
-        "                openHideManagerFromSettings();\n"
-        "                break;\n"
-        "            case SR_PRIVACY_MENU:\n"
-        "                // Asks for the PIN only when one has been set.\n"
-        "                PinLock.verify(this, prefs, \"Gizlilik\",\n"
-        "                        () -> enterSettingsPage(SPAGE_PRIVACY, SR_PRIVACY_MENU));\n"
-        "                break;\n"
-        "            case SR_PIN:\n"
-        "                PinLock.openSettings(this, prefs, this::refreshSettingsRows);\n"
-        "                break;\n"
-        "            case SR_APP_LOCK:\n"
-        "                if (!PinLock.isSet(prefs)) showToast(\"\\u00d6nce PIN kilidini ayarlay\\u0131n\");\n"
-        "                else PinLock.showAppLockPicker(this, prefs, new ArrayList<>(appList), this::refreshSettingsRows);\n"
-        "                break;\n"
-        "            case SR_SETTINGS_LOCK:\n"
-        "                if (!PinLock.isSet(prefs)) {\n"
-        "                    showToast(\"\\u00d6nce PIN kilidini ayarlay\\u0131n\");\n"
-        "                } else {\n"
-        "                    prefs.edit().putBoolean(PinLock.K_LOCK_SETTINGS,\n"
-        "                            !prefs.getBoolean(PinLock.K_LOCK_SETTINGS, false)).apply();\n"
-        "                    refreshSettingsRows();\n"
-        "                }\n"
-        "                break;\n")
+    new_case = r'''            case SR_HIDE_APPS:
+                // "Gizleme": every app with a Kilit (lock) and a Gizle (hide) switch.
+                PinLock.showPrivacyList(this, prefs, new ArrayList<>(appList),
+                        new PinLock.PrivacyHost() {
+                            @Override public boolean isHidden(String pkg) {
+                                return hiddenApps.contains(pkg);
+                            }
+                            @Override public void setHidden(AppInfo app, boolean hide) {
+                                setAppHiddenFromPrivacy(app, hide);
+                            }
+                            @Override public void onClosed() {
+                                finishPrivacyEdit();
+                            }
+                        });
+                break;
+            case SR_PRIVACY_MENU:
+                // Asks for the PIN only when one has been set.
+                PinLock.verify(this, prefs, "Gizlilik",
+                        () -> enterSettingsPage(SPAGE_PRIVACY, SR_PRIVACY_MENU));
+                break;
+            case SR_CUSTOM_MENU:
+                enterSettingsPage(SPAGE_CUSTOM, SR_CUSTOM_MENU);
+                break;
+            case SR_OTHER_MENU:
+                enterSettingsPage(SPAGE_OTHER, SR_OTHER_MENU);
+                break;
+            case SR_PIN:
+                PinLock.openSettings(this, prefs, this::refreshSettingsRows);
+                break;
+            case SR_SETTINGS_LOCK:
+                if (!PinLock.isSet(prefs)) {
+                    showToast("\u00d6nce PIN kilidini ayarlay\u0131n");
+                } else {
+                    prefs.edit().putBoolean(PinLock.K_LOCK_SETTINGS,
+                            !prefs.getBoolean(PinLock.K_LOCK_SETTINGS, false)).apply();
+                    refreshSettingsRows();
+                }
+                break;
+'''
     src = sub_once(src, old_case, lambda m: new_case, "SR_HIDE_APPS action")
 
-    helper = (
-        "    /** Opens the hidden-apps manager from the settings panel. */\n"
-        "    private void openHideManagerFromSettings() {\n"
-        "        pendingSettingsCursor       = SR_PRIVACY_MENU;\n"
-        "        keymapOpenedFromSettings    = true;\n"
-        "        hideManagerSkipSlotsOnExit  = true;\n"
-        "        hideSettingsPanel();\n"
-        "        showKeymapOverlay();\n"
-        "        enterHideManager();\n"
-        "    }\n\n")
+    # 6) helpers: hide/unhide from the list, row lookup ---------------------------
+    helper = r'''    private boolean privacyDirty = false;
+
+    /** Hide / unhide one app from the "Gizleme" list (batched: the shelf is
+     *  refreshed once when the list closes, see {@link #finishPrivacyEdit}). */
+    private void setAppHiddenFromPrivacy(AppInfo app, boolean hide) {
+        if (app == null) return;
+        if (hide) {
+            int idx = buildVisibleList().indexOf(app);
+            int oldHc = effectiveHomeCount(countVisible(appList));
+            boolean wasHome = idx >= 0 && idx < oldHc;
+            if (!hiddenApps.add(app.packageName)) return;
+            if (wasHome && homeCount > 1) { homeCount--; saveHomeCount(); }
+            saveHiddenApps();
+        } else {
+            if (!hiddenApps.remove(app.packageName)) return;
+            saveHiddenApps();
+            repositionUnhiddenIntoDrawer(app);
+        }
+        privacyDirty = true;
+    }
+
+    /** Called when the "Gizleme" list closes: refresh the shelf if needed and
+     *  give the settings panel its focus back. */
+    private void finishPrivacyEdit() {
+        if (privacyDirty) {
+            privacyDirty = false;
+            keymapHideBuiltSize = -1;
+            keymapHideDirty     = true;
+            RecyclingShelfView s = shelf;
+            if (s != null) applyShelfApps(s);
+        }
+        final FrameLayout ov = settingsOverlay;
+        if (ov != null) {
+            ov.requestFocus();
+            ov.post(() -> {
+                ov.requestFocus();
+                RingView rv = ringView;
+                if (rv != null) rv.setVisibility(View.INVISIBLE);
+            });
+        }
+    }
+
+    private static int indexInRows(int[] rows, int id) {
+        for (int i = 0; i < rows.length; i++) if (rows[i] == id) return i;
+        return 0;
+    }
+
+'''
     src = sub_once(
         src, r"(    /\*\* Execute the action bound to a settings row id\. \*/\n)",
         lambda m: helper + m.group(1), "helper insertion point")
 
-    # 6) settings lock: gear button asks for the PIN first -------------------
+    # 7) back navigation: Wallpaper -> Ozellestirme, Backup -> Diger ----------------
+    src = sub_once(
+        src,
+        r"    private void returnToSettingsMain\(\) \{\n"
+        r"        settingsPage = SPAGE_MAIN;\n"
+        r"        rebuildSettingsColumn\(\);\n"
+        r"        settingsSelectedRow = mainRowIndex\(settingsReturnRowId\);\n"
+        r"        refreshSettingsRows\(\);\n"
+        r"    \}",
+        lambda m: r'''    private void returnToSettingsMain() {
+        int parent = SPAGE_MAIN, parentMenuRow = -1;
+        if (settingsPage == SPAGE_WALLPAPER)   { parent = SPAGE_CUSTOM; parentMenuRow = SR_CUSTOM_MENU; }
+        else if (settingsPage == SPAGE_BACKUP) { parent = SPAGE_OTHER;  parentMenuRow = SR_OTHER_MENU; }
+        int landRow = settingsReturnRowId;
+        settingsPage = parent;
+        rebuildSettingsColumn();
+        if (parent == SPAGE_MAIN) {
+            settingsSelectedRow = mainRowIndex(landRow);
+        } else {
+            settingsSelectedRow = indexInRows(settingsPageRows(), landRow);
+            settingsReturnRowId = parentMenuRow;
+        }
+        refreshSettingsRows();
+    }''', "returnToSettingsMain")
+
+    # 8) re-opening the panel after a hand-off (keymap, About, ...) lands on the
+    #    page that holds the row we left from
+    src = sub_once(
+        src,
+        r"        settingsPage = SPAGE_MAIN;\n"
+        r"        rebuildSettingsColumn\(\);\n"
+        r"        settingsSelectedRow = mainRowIndex\(pendingSettingsCursor\);\n"
+        r"        pendingSettingsCursor = SR_HIDE_APPS;\n",
+        lambda m: r'''        int pendRow = pendingSettingsCursor;
+        int openPage = SPAGE_MAIN;
+        int[] searchOrder = { SPAGE_MAIN, SPAGE_CUSTOM, SPAGE_OTHER,
+                              SPAGE_PRIVACY, SPAGE_WALLPAPER, SPAGE_BACKUP };
+        search:
+        for (int pg : searchOrder) {
+            settingsPage = pg;
+            for (int r : settingsPageRows()) {
+                if (r == pendRow) { openPage = pg; break search; }
+            }
+        }
+        settingsPage = openPage;
+        if      (openPage == SPAGE_CUSTOM)    settingsReturnRowId = SR_CUSTOM_MENU;
+        else if (openPage == SPAGE_OTHER)     settingsReturnRowId = SR_OTHER_MENU;
+        else if (openPage == SPAGE_PRIVACY)   settingsReturnRowId = SR_PRIVACY_MENU;
+        else if (openPage == SPAGE_WALLPAPER) settingsReturnRowId = SR_WALLPAPER_MENU;
+        else if (openPage == SPAGE_BACKUP)    settingsReturnRowId = SR_BACKUP_MENU;
+        rebuildSettingsColumn();
+        settingsSelectedRow = indexInRows(settingsPageRows(), pendRow);
+        pendingSettingsCursor = SR_PRIVACY_MENU;
+''', "showSettingsPanel page lookup")
+
+    # 9) settings lock: gear click and gear long-press ----------------------------
     src = sub_once(
         src,
         r"(view\.playSoundEffect\(SoundEffectConstants\.CLICK\);\n)(\s+)showSettingsPanel\(\);",
@@ -764,8 +907,6 @@ def main():
                    + m.group(2) + "    showSettingsPanel();\n"
                    + m.group(2) + "}"),
         "gear click")
-
-    # 6b) settings lock also covers the gear's long-press (system Settings) --
     src = sub_once(
         src,
         r"(view\.playSoundEffect\(SoundEffectConstants\.CLICK\);\n)(\s+)openSystemSettings\(\);\n(\s+return true;)",
@@ -778,26 +919,73 @@ def main():
                    + m.group(3)),
         "gear long-press")
 
-    # 7) app lock: every launch goes through one gate ------------------------
+    # 10) app lock: every launch goes through one gate -----------------------------
     src = sub_once(
         src,
         r"    private void launchApp\(AppInfo app, View source\) \{\n"
         r"        final android\.os\.Bundle anim = launchAnimBundle\(source\);",
-        lambda m: (
-            "    private void launchApp(AppInfo app, View source) {\n"
-            "        if (app.tvInputId == null && PinLock.isAppLocked(prefs, app.packageName)) {\n"
-            "            final AppInfo lockedApp = app;\n"
-            "            PinLock.verify(this, prefs, lockedApp.label,\n"
-            "                    () -> launchAppNow(lockedApp, null));\n"
-            "            return;\n"
-            "        }\n"
-            "        launchAppNow(app, source);\n"
-            "    }\n\n"
-            "    private void launchAppNow(AppInfo app, View source) {\n"
-            "        final android.os.Bundle anim = launchAnimBundle(source);"),
-        "launchApp gate")
+        lambda m: r'''    private void launchApp(AppInfo app, View source) {
+        if (app.tvInputId == null && PinLock.isAppLocked(prefs, app.packageName)) {
+            final AppInfo lockedApp = app;
+            PinLock.verify(this, prefs, lockedApp.label,
+                    () -> launchAppNow(lockedApp, null));
+            return;
+        }
+        launchAppNow(app, source);
+    }
 
-    # 8) credit line under the settings list ---------------------------------
+    private void launchAppNow(AppInfo app, View source) {
+        final android.os.Bundle anim = launchAnimBundle(source);''', "launchApp gate")
+
+    # 11) long-press menu: no "Gizle" row ------------------------------------------
+    src = sub_once(
+        src, r"            RecyclingShelfView\.MENU_HIDE, RecyclingShelfView\.MENU_UNINSTALL,\n"
+             r"            RecyclingShelfView\.MENU_APP_INFO, RecyclingShelfView\.MENU_MOVE \};",
+        lambda m: "            RecyclingShelfView.MENU_UNINSTALL,\n"
+                  "            RecyclingShelfView.MENU_APP_INFO, RecyclingShelfView.MENU_MOVE };",
+        "menu rows full")
+    src = sub_once(
+        src, r"            RecyclingShelfView\.MENU_HIDE, RecyclingShelfView\.MENU_MOVE \};",
+        lambda m: "            RecyclingShelfView.MENU_MOVE };", "menu rows input")
+    src = sub_once(
+        src, r"        menuCol\.addView\(menuHide, itemLp0\);\n",
+        lambda m: "        // (\"Gizle\" row removed: hiding lives in Ayarlar > Gizlilik > Gizleme)\n",
+        "menu hide row")
+
+    # 12) all-apps drawer: more transparent ------------------------------------------
+    src = sub_once(src, r"0x7326262B", lambda m: "0x5226262B", "drawer alpha (blur)")
+    src = sub_once(src, r"0xE61E1E22", lambda m: "0xB81E1E22", "drawer alpha (no blur)")
+
+    # 13) TV icons: prefer the TV (leanback) activity so its banner is used ---------------
+    src = sub_once(
+        src,
+        r"        Intent first  = tv \? leanback : regular;\n"
+        r"        Intent second = tv \? regular  : leanback;",
+        lambda m: "        Intent first  = leanback;   // TV activity (with its banner) wins\n"
+                  "        Intent second = regular;",
+        "app discovery order")
+    src = sub_once(
+        src,
+        r"(        \} catch \(PackageManager\.NameNotFoundException \| RuntimeException ignored\) \{ /\* none \*/ \}\n)"
+        r"(        return null;\n)",
+        lambda m: m.group(1) + r'''        // Last resort: the app's TV (leanback) activity may carry the banner
+        // even when the activity we resolved for it is the phone one.
+        try {
+            Intent lb = new Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
+                    .setPackage(app.packageName);
+            List<android.content.pm.ResolveInfo> lbList = pm.queryIntentActivities(lb, 0);
+            if (lbList != null) {
+                for (android.content.pm.ResolveInfo r : lbList) {
+                    if (r.activityInfo == null) continue;
+                    Drawable b = r.activityInfo.loadBanner(pm);
+                    if (b != null) return b;
+                }
+            }
+        } catch (RuntimeException ignored) { /* none */ }
+''' + m.group(2), "banner fallback")
+
+    # 14) small credit line under the settings list -----------------------------------
     i = src.find("private void buildSettingsPanel()")
     if i < 0:
         sys.exit("PATCH ERROR: buildSettingsPanel not found")
@@ -806,22 +994,22 @@ def main():
     if j < 0 or j - i > 6000:
         sys.exit("PATCH ERROR: settings card anchor not found")
     j += len(anchor)
-    credit = (
-        "        // Small credit line at the bottom of the settings card.\n"
-        "        TextView creditView = new TextView(this);\n"
-        "        creditView.setText(\"D\\u00fczenleyen: Veysel Alemdar\");\n"
-        "        creditView.setTextColor(0x66FFFFFF);\n"
-        "        creditView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 9);\n"
-        "        creditView.setSingleLine(true);\n"
-        "        creditView.setGravity(Gravity.CENTER_HORIZONTAL);\n"
-        "        creditView.setPadding(dp(10), dp(6), dp(10), dp(2));\n"
-        "        android.widget.LinearLayout.LayoutParams creditLp =\n"
-        "                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);\n"
-        "        creditLp.gravity = Gravity.CENTER_HORIZONTAL;\n"
-        "        card.addView(creditView, creditLp);\n")
+    credit = r'''        // Small credit line at the bottom of the settings card.
+        TextView creditView = new TextView(this);
+        creditView.setText("D\u00fczenleyen: Veysel Alemdar");
+        creditView.setTextColor(0x66FFFFFF);
+        creditView.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 9);
+        creditView.setSingleLine(true);
+        creditView.setGravity(Gravity.CENTER_HORIZONTAL);
+        creditView.setPadding(dp(10), dp(6), dp(10), dp(2));
+        android.widget.LinearLayout.LayoutParams creditLp =
+                new android.widget.LinearLayout.LayoutParams(WRAP, WRAP);
+        creditLp.gravity = Gravity.CENTER_HORIZONTAL;
+        card.addView(creditView, creditLp);
+'''
     src = src[:j] + credit + src[j:]
 
-    # 9) Turkish indicator texts that live in Java code ----------------------
+    # 15) Turkish indicator texts that live in Java code ---------------------------------
     src = replace_n(src, '"Not set"', '"Ayars\\u0131z"', "Not set")
     src = replace_n(src, '? "Set" :', '? "Ayarl\\u0131" :', "Set")
     src = replace_n(src, '? "Full"', '? "Tam"', "Full")
