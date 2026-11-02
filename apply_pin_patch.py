@@ -11,6 +11,7 @@ source at build time; nothing is committed back.
   * Long-press   : "Gizle" removed from the app context menu
   * Icons        : TV (leanback) activity is preferred, so TV banners show
   * Drawer       : more transparent all-apps background
+  * Focus frame: on/off + colour (Ozellestirme), RingView supports both
   * Turkish UI, small credit line under the settings list
 
 Stops with an error (never guesses) if the source differs from expectations;
@@ -22,6 +23,7 @@ import sys
 BASE = "LauncherV15/app/src/main/"
 ACT  = BASE + "java/com/bare/launcher/LauncherActivity.java"
 PIN  = BASE + "java/com/bare/launcher/PinLock.java"
+RING = BASE + "java/com/bare/launcher/RingView.java"
 STR  = BASE + "res/values/strings.xml"
 
 PIN_LOCK_JAVA = r'''package com.bare.launcher;
@@ -79,6 +81,15 @@ final class PinLock {
 
     private static int  fails     = 0;
     private static long lockUntil = 0L;
+
+    /** Highlight colour (the focus-ring colour picked in settings). */
+    static int accent = 0xFF38BDF8;
+
+    private static Typeface mediumFont;
+    private static Typeface medium() {
+        if (mediumFont == null) mediumFont = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+        return mediumFont;
+    }
 
     interface PinListener { void onPin(String pin, Pad pad); }
 
@@ -349,10 +360,31 @@ final class PinLock {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             w.setDimAmount(0.65f);
+            w.setWindowAnimations(0);
             w.setLayout(dp(d.getContext(), widthDp),
                         ViewGroup.LayoutParams.WRAP_CONTENT);
         }
+        content.setAlpha(0f);
+        content.setScaleX(0.94f);
+        content.setScaleY(0.94f);
         d.show();
+        content.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(110).start();
+    }
+
+    /** Quick "pressed" feedback for a key. */
+    private static void pressFx(final View v) {
+        v.animate().scaleX(0.9f).scaleY(0.9f).setDuration(40).withEndAction(() -> {
+            float rest = v.isFocused() ? 1.06f : 1f;
+            v.animate().scaleX(rest).scaleY(rest).setDuration(70).start();
+        }).start();
+    }
+
+    /** Short left-right shake (wrong PIN). */
+    private static void shake(final View v, final int amp) {
+        v.animate().translationX(-amp).setDuration(45).withEndAction(() ->
+        v.animate().translationX(amp).setDuration(70).withEndAction(() ->
+        v.animate().translationX(-amp / 2f).setDuration(60).withEndAction(() ->
+        v.animate().translationX(0f).setDuration(50).start()).start()).start()).start();
     }
 
     private static LinearLayout card(Context c) {
@@ -383,7 +415,7 @@ final class PinLock {
 
     private static void paint(TextView t, GradientDrawable bg, boolean focused) {
         boolean on = t.isSelected();
-        bg.setColor(focused ? 0xFFEFEFEF : (on ? 0x6638BDF8 : 0x22FFFFFF));
+        bg.setColor(focused ? 0xFFEFEFEF : (on ? ((accent & 0x00FFFFFF) | 0x66000000) : 0x22FFFFFF));
         t.setTextColor(focused ? 0xFF111114 : (on ? 0xFFFFFFFF : 0xE6FFFFFF));
     }
 
@@ -393,14 +425,18 @@ final class PinLock {
         t.setText(text);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
         t.setGravity(Gravity.CENTER);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setTypeface(medium());
         t.setFocusable(true);
         t.setClickable(true);
         final GradientDrawable bg = new GradientDrawable();
-        bg.setCornerRadius(dp(c, 10));
+        bg.setCornerRadius(dp(c, hDp) / 2f);
         t.setBackground(bg);
         paint(t, bg, false);
-        t.setOnFocusChangeListener((v, focused) -> paint(t, bg, focused));
+        t.setOnFocusChangeListener((v, focused) -> {
+            paint(t, bg, focused);
+            t.animate().scaleX(focused ? 1.06f : 1f).scaleY(focused ? 1.06f : 1f)
+                    .setDuration(80).start();
+        });
         LinearLayout.LayoutParams lp = (wDp > 0)
                 ? new LinearLayout.LayoutParams(dp(c, wDp), dp(c, hDp))
                 : new LinearLayout.LayoutParams(0, dp(c, hDp), 1f);
@@ -417,7 +453,10 @@ final class PinLock {
     static final class Pad {
         private final Dialog dlg;
         private final LinearLayout root;
-        private final TextView dots;
+        private final Context ctx;
+        private final LinearLayout dotRow;
+        private final View[] dot = new View[LEN];
+        private boolean errorTint = false;
         private final TextView msg;
         private final String subtitle;
         private final StringBuilder buf = new StringBuilder();
@@ -427,14 +466,28 @@ final class PinLock {
         private boolean busy = false;
 
         Pad(Activity a, String title, String subtitleText) {
+            ctx = a;
             subtitle = subtitleText;
             dlg = baseDialog(a);
             root = card(a);
             root.addView(label(a, title, 15, 0xFFFFFFFF, 2));
             msg = label(a, subtitleText, 12, 0xB3FFFFFF, 6);
             root.addView(msg);
-            dots = label(a, "", 26, 0xFFFFFFFF, 8);
-            root.addView(dots);
+            dotRow = new LinearLayout(a);
+            dotRow.setOrientation(LinearLayout.HORIZONTAL);
+            dotRow.setGravity(Gravity.CENTER);
+            for (int i = 0; i < LEN; i++) {
+                View dv = new View(a);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(a, 14), dp(a, 14));
+                dlp.setMargins(dp(a, 7), 0, dp(a, 7), 0);
+                dv.setLayoutParams(dlp);
+                dot[i] = dv;
+                dotRow.addView(dv);
+            }
+            LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rowLp.bottomMargin = dp(a, 10);
+            root.addView(dotRow, rowLp);
 
             String[][] keys = {
                     {"1", "2", "3"},
@@ -448,7 +501,7 @@ final class PinLock {
                 for (final String k : rowKeys) {
                     TextView b = button(a, k, 0, 46, 17);
                     if (k.equals("5")) firstFocus = b;
-                    b.setOnClickListener(v -> onKey(k));
+                    b.setOnClickListener(v -> { pressFx(v); onKey(k); });
                     row.addView(b);
                 }
                 root.addView(row, new LinearLayout.LayoutParams(
@@ -487,18 +540,22 @@ final class PinLock {
             try { dlg.dismiss(); } catch (Exception ignored) { /* already gone */ }
         }
 
-        /** Show an error, then clear the digits and accept input again. */
+        /** Show an error (red dots + shake), then clear and accept input again. */
         void fail(String text) {
             msg.setText(text);
             msg.setTextColor(0xFFFF6B6B);
             busy = true;
+            errorTint = true;
+            refresh();
+            shake(dotRow, dp(ctx, 9));
             h.postDelayed(() -> {
+                errorTint = false;
                 buf.setLength(0);
                 refresh();
                 msg.setText(subtitle);
                 msg.setTextColor(0xB3FFFFFF);
                 busy = false;
-            }, 700);
+            }, 450);
         }
 
         private void onKey(String k) {
@@ -511,6 +568,10 @@ final class PinLock {
             if (busy || buf.length() >= LEN) return;
             buf.append(digit);
             refresh();
+            View nd = dot[buf.length() - 1];
+            nd.setScaleX(1.4f);
+            nd.setScaleY(1.4f);
+            nd.animate().scaleX(1f).scaleY(1f).setDuration(110).start();
             if (buf.length() == LEN && listener != null) {
                 busy = true;
                 listener.onPin(buf.toString(), this);
@@ -524,12 +585,15 @@ final class PinLock {
         }
 
         private void refresh() {
-            StringBuilder sb = new StringBuilder();
+            int color = errorTint ? 0xFFFF6B6B : accent;
             for (int i = 0; i < LEN; i++) {
-                if (i > 0) sb.append("  ");
-                sb.append(i < buf.length() ? "\u25cf" : "\u25cb");
+                boolean filled = i < buf.length();
+                GradientDrawable g = new GradientDrawable();
+                g.setShape(GradientDrawable.OVAL);
+                g.setColor(filled ? color : 0x00000000);
+                g.setStroke(dp(ctx, 2), filled ? color : 0x66FFFFFF);
+                dot[i].setBackground(g);
             }
-            dots.setText(sb.toString());
         }
     }
 }
@@ -583,6 +647,8 @@ STRINGS_TR = r'''<?xml version="1.0" encoding="utf-8"?>
     <string name="settings_row_other">Diğer</string>
     <string name="settings_row_pin">PIN kilidi</string>
     <string name="settings_row_settings_lock">Ayarlar kilidi</string>
+    <string name="settings_row_focus_ring">Odak çerçevesi</string>
+    <string name="settings_row_focus_color">Çerçeve rengi</string>
 
     <!-- Hakkında -->
     <string name="about_app_name">BareLauncher</string>
@@ -669,6 +735,8 @@ def main():
     private static final int SR_SETTINGS_LOCK  = 17;
     private static final int SR_CUSTOM_MENU    = 18;   // -> SPAGE_CUSTOM
     private static final int SR_OTHER_MENU     = 19;   // -> SPAGE_OTHER
+    private static final int SR_FOCUS_RING     = 20;
+    private static final int SR_FOCUS_COLOR    = 21;
 ''', "row ids")
     src = sub_once(
         src, r"SPAGE_MAIN = 0, SPAGE_WALLPAPER = 1, SPAGE_BACKUP = 2;",
@@ -690,7 +758,7 @@ def main():
         lambda m: r'''    private static final int[] SROWS_PRIVACY = {
             SR_PIN, SR_HIDE_APPS, SR_SETTINGS_LOCK };
     private static final int[] SROWS_CUSTOM = {
-            SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK };
+            SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK, SR_FOCUS_RING, SR_FOCUS_COLOR };
     private static final int[] SROWS_OTHER = {
             SR_BACKUP_MENU, SR_SYSTEM, SR_ABOUT };
 ''' + m.group(1), "new page arrays")
@@ -710,18 +778,24 @@ def main():
             case SR_OTHER_MENU:         return R.string.settings_row_other;
             case SR_PIN:                return R.string.settings_row_pin;
             case SR_SETTINGS_LOCK:      return R.string.settings_row_settings_lock;
+            case SR_FOCUS_RING:         return R.string.settings_row_focus_ring;
+            case SR_FOCUS_COLOR:        return R.string.settings_row_focus_color;
 ''', "row labels")
 
     # 4) state indicators for PIN / settings lock ------------------------------
     src = sub_once(
         src, r"(return rowId == SR_CLOCK\n)",
         lambda m: m.group(1) + "            || rowId == SR_PIN\n"
-                               "            || rowId == SR_SETTINGS_LOCK\n",
+                               "            || rowId == SR_SETTINGS_LOCK\n"
+                               "            || rowId == SR_FOCUS_RING\n"
+                               "            || rowId == SR_FOCUS_COLOR\n",
         "indicator rows")
     src = sub_once(
         src, r'(            case SR_SLIDESHOW_FOLDER:   return "Not set";\n)',
         lambda m: m.group(1) + r'''            case SR_PIN:                return "Ayarl\u0131";
             case SR_SETTINGS_LOCK:      return "Kapal\u0131";
+            case SR_FOCUS_RING:         return "Kapal\u0131";
+            case SR_FOCUS_COLOR:        return "A\u00e7\u0131k ye\u015fil";
 ''', "indicator widest text")
     src = sub_once(
         src,
@@ -734,6 +808,14 @@ def main():
                     boolean setLockOn = prefs.getBoolean(PinLock.K_LOCK_SETTINGS, false);
                     ind.setText(setLockOn ? "A\u00e7\u0131k" : "Kapal\u0131");
                     ind.setTextColor(setLockOn ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
+                } else if (rowId == SR_FOCUS_RING) {
+                    boolean ringOn = prefs.getBoolean("ring_on", true);
+                    ind.setText(ringOn ? "A\u00e7\u0131k" : "Kapal\u0131");
+                    ind.setTextColor(ringOn ? (sel ? selTx : 0xFF7DD3FC) : (sel ? 0x66111114 : 0x66FFFFFF));
+                } else if (rowId == SR_FOCUS_COLOR) {
+                    int rcIdx = ringColorIndex();
+                    ind.setText(RING_COLOR_NAMES[rcIdx]);
+                    ind.setTextColor(sel ? selTx : RING_COLORS[rcIdx]);
 ''' + m.group(1), "indicator refresh")
 
     # 5) row actions -----------------------------------------------------------
@@ -785,11 +867,40 @@ def main():
                     refreshSettingsRows();
                 }
                 break;
+            case SR_FOCUS_RING:
+                prefs.edit().putBoolean("ring_on", !prefs.getBoolean("ring_on", true)).apply();
+                applyRingStyle();
+                refreshSettingsRows();
+                break;
+            case SR_FOCUS_COLOR:
+                prefs.edit().putInt("ring_color", (ringColorIndex() + 1) % RING_COLORS.length).apply();
+                applyRingStyle();
+                refreshSettingsRows();
+                break;
 '''
     src = sub_once(src, old_case, lambda m: new_case, "SR_HIDE_APPS action")
 
     # 6) helpers: hide/unhide from the list, row lookup ---------------------------
-    helper = r'''    private boolean privacyDirty = false;
+    helper = r'''    private static final int[] RING_COLORS = {
+            0xFFFFFFFF, 0xFF22D3EE, 0xFF86EFAC, 0xFFFDE047, 0xFFF472B6 };
+    private static final String[] RING_COLOR_NAMES = {
+            "Beyaz", "Cyan", "A\u00e7\u0131k ye\u015fil", "Sar\u0131", "Pembe" };
+
+    private int ringColorIndex() {
+        int i = prefs == null ? 0 : prefs.getInt("ring_color", 0);
+        return (i < 0 || i >= RING_COLORS.length) ? 0 : i;
+    }
+
+    /** Applies the focus-frame on/off + colour settings (also tints the PIN pad). */
+    private void applyRingStyle() {
+        if (prefs == null) return;
+        int c = RING_COLORS[ringColorIndex()];
+        PinLock.accent = c;
+        RingView rv = ringView;
+        if (rv != null) rv.setStyle(prefs.getBoolean("ring_on", true), c);
+    }
+
+    private boolean privacyDirty = false;
 
     /** Hide / unhide one app from the "Gizleme" list (batched: the shelf is
      *  refreshed once when the list closes, see {@link #finishPrivacyEdit}). */
@@ -984,6 +1095,26 @@ def main():
             }
         } catch (RuntimeException ignored) { /* none */ }
 ''' + m.group(2), "banner fallback")
+
+    src = sub_once(
+        src, r"(        ringView\.setContentDescription\(getString\(R\.string\.cd_selection_ring\)\);\n)",
+        lambda m: m.group(1) + "        applyRingStyle();\n", "apply ring style at start")
+
+    # 13b) RingView: on/off + colour
+    rv = read(RING)
+    rv = replace_n(
+        rv, "    @Override protected void onSizeChanged(",
+        "    private boolean drawRing = true;\n\n"
+        "    /** Focus frame on/off and colour (settings > Ozellestirme). */\n"
+        "    void setStyle(boolean enabled, int color) {\n"
+        "        drawRing = enabled;\n"
+        "        ring.setColor(color);\n"
+        "        invalidate();\n"
+        "    }\n\n"
+        "    @Override protected void onSizeChanged(", "RingView setStyle")
+    rv = replace_n(rv, "if (halfW <= 0 || halfH <= 0) return;",
+                   "if (!drawRing || halfW <= 0 || halfH <= 0) return;", "RingView draw")
+    write(RING, rv)
 
     # 14) small credit line under the settings list -----------------------------------
     i = src.find("private void buildSettingsPanel()")
