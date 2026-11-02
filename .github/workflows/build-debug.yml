@@ -1,8 +1,10 @@
-name: Build debug APK (PIN)
+name: Build APK (PIN)
 
-# Manual trigger only: Actions tab -> "Build debug APK (PIN)" -> Run workflow.
-# Needs no secrets / signing keys. Produces a debug-signed APK and attaches
-# it to a GitHub Release so it can be downloaded directly (also from a phone).
+# Manual trigger only: Actions tab -> "Build APK (PIN)" -> Run workflow.
+# Builds the small, optimised RELEASE APK (R8 shrink + resource shrink) and
+# signs it with a throw-away key that is created once and kept in the Actions
+# cache, so later builds install OVER the previous one (PIN/settings survive).
+# No secrets needed. The APK is attached to a GitHub Release.
 
 on:
   workflow_dispatch:
@@ -27,7 +29,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Add PIN feature to the source
+      - name: Apply the patch to the source
         run: python3 apply_pin_patch.py
 
       - name: Install Gradle ${{ env.GRADLE_VERSION }}
@@ -43,15 +45,38 @@ jobs:
           gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
 
-      - name: Build debug APK
+      - name: Restore signing key (cache)
+        id: keycache
+        uses: actions/cache@v4
+        with:
+          path: ~/bare-signing
+          key: bare-signing-key-v1
+
+      - name: Create signing key (first run only)
+        if: steps.keycache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bare-signing"
+          keytool -genkeypair -keystore "$HOME/bare-signing/release.jks" -storetype JKS \
+            -storepass barelauncher -keypass barelauncher -alias barekey \
+            -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=BareLauncher"
+
+      - name: Build signed release APK
         working-directory: LauncherV15
-        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+        run: |
+          ./gradlew :app:assembleRelease \
+            -Pandroid.injected.signing.store.file="$HOME/bare-signing/release.jks" \
+            -Pandroid.injected.signing.store.password=barelauncher \
+            -Pandroid.injected.signing.key.alias=barekey \
+            -Pandroid.injected.signing.key.password=barelauncher \
+            -Pandroid.injected.signing.store.type=JKS \
+            --no-daemon --stacktrace
 
       - name: Rename APK
         run: |
           set -euo pipefail
-          cp LauncherV15/app/build/outputs/apk/debug/app-debug.apk BareLauncher-PIN.apk
-          ls -lh BareLauncher-PIN.apk
+          cp LauncherV15/app/build/outputs/apk/release/app-release.apk BareLauncher-PIN.apk
+          ls -l BareLauncher-PIN.apk
 
       - name: Upload APK as workflow artifact (backup)
         uses: actions/upload-artifact@v4
@@ -65,8 +90,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="pin-build-${{ github.run_number }}"
+          SIZE=$(du -k BareLauncher-PIN.apk | cut -f1)
           gh release create "$TAG" BareLauncher-PIN.apk \
             --title "BareLauncher + PIN ($TAG)" \
-            --notes "Debug-signed APK with the hidden-apps PIN lock." \
+            --notes "Release APK, ${SIZE} KB." \
             --prerelease \
             --target "${{ github.sha }}"
