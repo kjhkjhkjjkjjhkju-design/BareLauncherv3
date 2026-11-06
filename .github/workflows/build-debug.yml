@@ -48,6 +48,8 @@ jobs:
             * Drawer       : more transparent all-apps background
             * Focus frame: on/off + colour (Ozellestirme), RingView supports both
             * Icon roundness 0-30 % (step 2, default 20), lint gate off for release builds
+            * About screen + QR code removed (code deleted)
+            * PIN screen styles: modern (one row active, LEFT/OK/RIGHT = 3 keys) and classic
             * Turkish UI, small credit line under the settings list
 
           Stops with an error (never guesses) if the source differs from expectations;
@@ -60,6 +62,8 @@ jobs:
           ACT  = BASE + "java/com/bare/launcher/LauncherActivity.java"
           PIN  = BASE + "java/com/bare/launcher/PinLock.java"
           RING = BASE + "java/com/bare/launcher/RingView.java"
+          QRC  = BASE + "java/com/bare/launcher/QrCode.java"
+          PRO  = "LauncherV15/app/proguard-rules.pro"
           STR  = BASE + "res/values/strings.xml"
 
           PIN_LOCK_JAVA = r'''package com.bare.launcher;
@@ -93,7 +97,6 @@ jobs:
           import java.util.Collections;
           import java.util.HashSet;
           import java.util.List;
-          import java.util.Locale;
           import java.util.Set;
 
           /**
@@ -141,7 +144,7 @@ jobs:
               static void verify(final Activity a, final SharedPreferences p,
                                  String title, final Runnable onOk) {
                   if (!isSet(p)) { onOk.run(); return; }
-                  new Pad(a, title, "PIN'i girin").show((pin, pad) -> {
+                  new Pad(a, title, "PIN'i girin", isModern(p)).show((pin, pad) -> {
                       if (SystemClock.elapsedRealtime() < lockUntil) {
                           pad.fail("Kilitli, biraz bekleyin");
                           return;
@@ -176,6 +179,11 @@ jobs:
                   showOptions(a, p, onChanged);
               }
 
+              /** PIN screen style from Settings > Gizlilik: 1 = modern (default), 0 = classic. */
+              static boolean isModern(SharedPreferences p) {
+                  return p == null || p.getInt("pin_style", 1) == 1;
+              }
+
               /** True when the settings panel itself must ask for the PIN. */
               static boolean settingsLocked(SharedPreferences p) {
                   return p != null && isSet(p) && p.getBoolean(K_LOCK_SETTINGS, false);
@@ -189,7 +197,8 @@ jobs:
               /** True when {@code pkg} is a locked app and a PIN exists. */
               static boolean isAppLocked(SharedPreferences p, String pkg) {
                   if (p == null || pkg == null || !isSet(p)) return false;
-                  return lockedSet(p).contains(pkg);
+                  Set<String> s = p.getStringSet(K_LOCKED_APPS, null);   // read-only: no copy
+                  return s != null && s.contains(pkg);
               }
 
               static int lockedCount(SharedPreferences p) {
@@ -294,9 +303,9 @@ jobs:
 
               private static void createNew(final Activity a, final SharedPreferences p,
                                             final String title, final Runnable onChanged) {
-                  new Pad(a, title, "Yeni PIN (" + LEN + " hane)").show((pin1, pad1) -> {
+                  new Pad(a, title, "Yeni PIN (" + LEN + " hane)", isModern(p)).show((pin1, pad1) -> {
                       pad1.dismiss();
-                      new Pad(a, title, "PIN'i tekrar girin").show((pin2, pad2) -> {
+                      new Pad(a, title, "PIN'i tekrar girin", isModern(p)).show((pin2, pad2) -> {
                           if (pin1.equals(pin2)) {
                               save(p, pin1);
                               pad2.dismiss();
@@ -341,9 +350,14 @@ jobs:
               // ── Storage ──────────────────────────────────────────────────────────
 
               private static String hex(byte[] bytes) {
-                  StringBuilder sb = new StringBuilder(bytes.length * 2);
-                  for (byte b : bytes) sb.append(String.format(Locale.ROOT, "%02x", b & 0xff));
-                  return sb.toString();
+                  final char[] digits = "0123456789abcdef".toCharArray();
+                  char[] out = new char[bytes.length * 2];
+                  for (int i = 0; i < bytes.length; i++) {
+                      int v = bytes[i] & 0xff;
+                      out[i * 2]     = digits[v >>> 4];
+                      out[i * 2 + 1] = digits[v & 0x0f];
+                  }
+                  return new String(out);
               }
 
               private static String hash(String salt, String pin) {
@@ -486,6 +500,13 @@ jobs:
 
               private static final int PAD_W = 264;   // dp, width of the key grid
 
+              private static final String[][] KEYS = {
+                      {"1", "2", "3"},
+                      {"4", "5", "6"},
+                      {"7", "8", "9"},
+                      {"Sil", "0", "\u0130ptal"}
+              };
+
               static final class Pad {
                   private final Dialog dlg;
                   private final LinearLayout root;
@@ -498,11 +519,16 @@ jobs:
                   private final StringBuilder buf = new StringBuilder();
                   private final android.os.Handler h = new android.os.Handler(Looper.getMainLooper());
                   private TextView firstFocus;
+                  private final boolean modern;
+                  private final TextView[][] cap = new TextView[4][3];
+                  private final LinearLayout[] rowBox = new LinearLayout[4];
+                  private int curRow = 0;
                   private PinListener listener;
                   private boolean busy = false;
 
-                  Pad(Activity a, String title, String subtitleText) {
+                  Pad(Activity a, String title, String subtitleText, boolean modernStyle) {
                       ctx = a;
+                      modern = modernStyle;
                       subtitle = subtitleText;
                       dlg = baseDialog(a);
                       root = card(a);
@@ -525,28 +551,81 @@ jobs:
                       rowLp.bottomMargin = dp(a, 10);
                       root.addView(dotRow, rowLp);
 
-                      String[][] keys = {
-                              {"1", "2", "3"},
-                              {"4", "5", "6"},
-                              {"7", "8", "9"},
-                              {"Sil", "0", "\u0130ptal"}
-                      };
-                      for (String[] rowKeys : keys) {
-                          LinearLayout row = new LinearLayout(a);
-                          row.setOrientation(LinearLayout.HORIZONTAL);
-                          for (final String k : rowKeys) {
-                              TextView b = button(a, k, 0, 46, 17);
-                              if (k.equals("5")) firstFocus = b;
-                              b.setOnClickListener(v -> { pressFx(v); onKey(k); });
-                              row.addView(b);
+                      if (!modern) {
+                          for (String[] rowKeys : KEYS) {
+                              LinearLayout row = new LinearLayout(a);
+                              row.setOrientation(LinearLayout.HORIZONTAL);
+                              for (final String k : rowKeys) {
+                                  TextView b = button(a, k, 0, 46, 17);
+                                  if (k.equals("5")) firstFocus = b;
+                                  b.setOnClickListener(v -> { pressFx(v); onKey(k); });
+                                  row.addView(b);
+                              }
+                              root.addView(row, new LinearLayout.LayoutParams(
+                                      dp(a, PAD_W), ViewGroup.LayoutParams.WRAP_CONTENT));
                           }
-                          root.addView(row, new LinearLayout.LayoutParams(
-                                  dp(a, PAD_W), ViewGroup.LayoutParams.WRAP_CONTENT));
+                      } else {
+                          // Modern: one row is "active"; LEFT / OK / RIGHT type the
+                          // row's 1st / 2nd / 3rd key, UP / DOWN change the row.
+                          for (int r = 0; r < 4; r++) {
+                              LinearLayout row = new LinearLayout(a);
+                              row.setOrientation(LinearLayout.HORIZONTAL);
+                              row.setGravity(Gravity.CENTER_VERTICAL);
+                              row.setPadding(dp(a, 6), dp(a, 4), dp(a, 6), dp(a, 4));
+                              for (int c = 0; c < 3; c++) {
+                                  TextView k = new TextView(a);
+                                  k.setText(KEYS[r][c]);
+                                  k.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+                                  k.setTypeface(medium());
+                                  k.setGravity(Gravity.CENTER);
+                                  k.setTextColor(0xFFFFFFFF);
+                                  LinearLayout.LayoutParams klp = new LinearLayout.LayoutParams(0, dp(a, 40), 1f);
+                                  klp.setMargins(dp(a, 3), 0, dp(a, 3), 0);
+                                  k.setLayoutParams(klp);
+                                  GradientDrawable kb = new GradientDrawable();
+                                  kb.setCornerRadius(dp(a, 20));
+                                  kb.setColor(0x22FFFFFF);
+                                  k.setBackground(kb);
+                                  cap[r][c] = k;
+                                  row.addView(k);
+                              }
+                              rowBox[r] = row;
+                              root.addView(row, new LinearLayout.LayoutParams(
+                                      dp(a, PAD_W), ViewGroup.LayoutParams.WRAP_CONTENT));
+                          }
+                          root.addView(label(a, "Yukar\u0131 / a\u015fa\u011f\u0131: sat\u0131r   \u2022   Sol / OK / Sa\u011f: tu\u015f",
+                                  11, 0x80FFFFFF, 0));
+                          updateRows();
                       }
                       refresh();
 
                       dlg.setOnKeyListener((d, keyCode, ev) -> {
-                          if (ev.getAction() != KeyEvent.ACTION_DOWN) return false;
+                          final boolean down = ev.getAction() == KeyEvent.ACTION_DOWN;
+                          if (modern) {
+                              switch (keyCode) {
+                                  case KeyEvent.KEYCODE_DPAD_UP:
+                                      if (down) moveRow(-1);
+                                      return true;
+                                  case KeyEvent.KEYCODE_DPAD_DOWN:
+                                      if (down) moveRow(+1);
+                                      return true;
+                                  case KeyEvent.KEYCODE_DPAD_LEFT:
+                                      if (down && ev.getRepeatCount() == 0) pressCap(0);
+                                      return true;
+                                  case KeyEvent.KEYCODE_DPAD_RIGHT:
+                                      if (down && ev.getRepeatCount() == 0) pressCap(2);
+                                      return true;
+                                  case KeyEvent.KEYCODE_DPAD_CENTER:
+                                  case KeyEvent.KEYCODE_ENTER:
+                                  case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                                  case KeyEvent.KEYCODE_BUTTON_A:
+                                      if (down && ev.getRepeatCount() == 0) pressCap(1);
+                                      return true;
+                                  default:
+                                      break;
+                              }
+                          }
+                          if (!down) return false;
                           if (keyCode >= KeyEvent.KEYCODE_0 && keyCode <= KeyEvent.KEYCODE_9) {
                               add(String.valueOf(keyCode - KeyEvent.KEYCODE_0));
                               return true;
@@ -559,8 +638,36 @@ jobs:
                               backspace();
                               return true;
                           }
-                          return false;   // D-pad, OK and BACK keep their normal behaviour
+                          return false;   // BACK (and classic D-pad focus moves) keep their normal behaviour
                       });
+                  }
+
+                  // ── modern style helpers ─────────────────────────────────────────
+
+                  private void moveRow(int d) {
+                      curRow = (curRow + d + 4) % 4;
+                      updateRows();
+                  }
+
+                  private void pressCap(int col) {
+                      pressFx(cap[curRow][col]);
+                      onKey(KEYS[curRow][col]);
+                  }
+
+                  private void updateRows() {
+                      for (int r = 0; r < 4; r++) {
+                          boolean on = r == curRow;
+                          GradientDrawable g = new GradientDrawable();
+                          g.setCornerRadius(dp(ctx, 24));
+                          if (on) {
+                              g.setColor((accent & 0x00FFFFFF) | 0x26000000);
+                              g.setStroke(dp(ctx, 2), accent);
+                          } else {
+                              g.setColor(0x00000000);
+                          }
+                          rowBox[r].setBackground(g);
+                          for (int c = 0; c < 3; c++) cap[r][c].setAlpha(on ? 1f : 0.45f);
+                      }
                   }
 
                   void show(PinListener l) {
@@ -591,7 +698,7 @@ jobs:
                           msg.setText(subtitle);
                           msg.setTextColor(0xB3FFFFFF);
                           busy = false;
-                      }, 450);
+                      }, 380);
                   }
 
                   private void onKey(String k) {
@@ -677,7 +784,6 @@ jobs:
               <string name="settings_row_backup">Ayarları yedekle</string>
               <string name="settings_row_restore">Ayarları geri yükle</string>
               <string name="settings_row_system_settings">Sistem ayarları</string>
-              <string name="settings_row_about">Hakkında</string>
               <string name="settings_row_privacy">Gizlilik</string>
               <string name="settings_row_customize">Özelleştirme</string>
               <string name="settings_row_other">Diğer</string>
@@ -686,16 +792,8 @@ jobs:
               <string name="settings_row_focus_ring">Odak çerçevesi</string>
               <string name="settings_row_focus_color">Çerçeve rengi</string>
               <string name="settings_row_corner">Simge yuvarlaklığı</string>
+              <string name="settings_row_pin_style">PIN ekranı</string>
 
-              <!-- Hakkında -->
-              <string name="about_app_name">BareLauncher</string>
-              <string name="about_kofi">Ko-fi üzerinden destek ol</string>
-              <string name="about_downloader_code">Downloader kodu:  %1$s</string>
-              <string name="about_check_github">GitHub\'daki son sürümü kontrol et</string>
-              <string name="about_made_by">Mithun tarafından özenle yapıldı</string>
-              <string name="about_qr_kofi_caption">Ko-fi sayfamı açmak için tara</string>
-              <string name="about_qr_github_caption">GitHub sayfasında daha yeni bir sürüm bulursan, yukarıdaki Downloader kodunu kullanarak indirip kurabilirsin.</string>
-              <string name="about_github_link_button">BareLauncher son sürüm</string>
 
               <!-- Kumanda tuşları -->
               <string name="key_red">Kırmızı</string>
@@ -712,7 +810,6 @@ jobs:
               <string name="toast_app_unavailable">Uygulama kullanılamıyor</string>
               <string name="toast_input_unavailable">Bu girişe geçilemiyor</string>
               <string name="toast_no_file_picker">Dosya seçici bulunamadı</string>
-              <string name="toast_no_browser">Bağlantıyı açacak tarayıcı yok</string>
               <string name="toast_wallpaper_load_failed">Duvar kağıdı yüklenemedi</string>
               <string name="toast_wallpaper_no_permission">Bu görsel için izin alınamadı</string>
               <string name="toast_cannot_uninstall">%1$s kaldırılamıyor</string>
@@ -757,12 +854,95 @@ jobs:
               return text.replace(old, new)
 
 
+          def match_brace(s, open_idx):
+              """Index of the '}' that closes the '{' at open_idx (skips strings/comments)."""
+              depth, i, n = 0, open_idx, len(s)
+              while i < n:
+                  c = s[i]
+                  if s.startswith("//", i):
+                      i = s.index("\n", i)
+                      continue
+                  if s.startswith("/*", i):
+                      i = s.index("*/", i) + 2
+                      continue
+                  if c == '"' or c == "'":
+                      q = c
+                      i += 1
+                      while s[i] != q:
+                          i += 2 if s[i] == "\\" else 1
+                      i += 1
+                      continue
+                  if c == "{":
+                      depth += 1
+                  elif c == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return i
+                  i += 1
+              sys.exit("PATCH ERROR: unbalanced braces")
+
+
+          def remove_about(src):
+              """Delete the About overlay: fields, methods and every reference."""
+              # fields + constants
+              a = src.index("    // \u2500\u2500 About overlay (v1.4.9) ")
+              end_marker = 'releases/latest";\n'
+              b = src.index(end_marker, a) + len(end_marker)
+              src = src[:a] + src[b:]
+              # the whole block of About methods (version, build, rows, QR, show/hide, keys)
+              start = src.index("    // \u2500\u2500 About overlay build / show / hide / navigate / QR")
+              sig = src.index("    private boolean handleAboutKey(int kc) {", start)
+              close = match_brace(src, src.index("{", sig))
+              end = close + 1
+              if src[end] == "\n":
+                  end += 1
+              src = src[:start] + src[end:]
+              # scattered references
+              pats = [
+                  (r"[ ]*// 0b\. About overlay open[^\n]*\n[ ]*FrameLayout ab = aboutOverlay;\n"
+                   r"[ ]*if \(ab != null && ab\.getVisibility\(\) == View\.VISIBLE\) \{\n"
+                   r"[ ]*handleAboutKey\(KeyEvent\.KEYCODE_BACK\);\n[ ]*return;\n[ ]*\}\n", "back (key)"),
+                  (r"        aboutOverlay = null; aboutCard = null; aboutListView = null;\n"
+                   r"        aboutQrView = null; aboutQrImage = null; aboutQrCaption = null;\n"
+                   r"        aboutQrLink = null; aboutQrUrl = null;\n"
+                   r"        aboutRows\[0\] = null; aboutRows\[1\] = null;\n", "teardown"),
+                  (r"        FrameLayout ao = aboutOverlay;\n"
+                   r"        if \(ao != null && ao\.getVisibility\(\) == View\.VISIBLE\) \{\n"
+                   r"            handleAboutKey\(KeyEvent\.KEYCODE_BACK\); return;\n        \}\n", "onBackPressed"),
+                  (r"        FrameLayout ao = aboutOverlay;\n"
+                   r"        if \(ao != null && ao\.getVisibility\(\) == View\.VISIBLE\) \{\n"
+                   r"            if \(event\.getAction\(\) == KeyEvent\.ACTION_DOWN\) \{\n"
+                   r"                if \(handleAboutKey\(event\.getKeyCode\(\)\)\) return true;\n"
+                   r"                return super\.dispatchKeyEvent\(event\);\n            \}\n"
+                   r"(?:            //[^\n]*\n)+"
+                   r"            if \(isLetThroughKey\(event\.getKeyCode\(\)\)\) return super\.dispatchKeyEvent\(event\);\n"
+                   r"            return true;\n        \}\n", "dispatchKeyEvent"),
+                  (r"        if \(aboutOpenedFromSettings\) return true;\n", "overlay flag"),
+                  (r"        FrameLayout ao = aboutOverlay;\n"
+                   r"        if \(ao != null && ao\.getVisibility\(\) == View\.VISIBLE\) return true;\n", "overlay open"),
+                  (r"            case SR_ABOUT:\n                pendingSettingsCursor = SR_ABOUT;\n"
+                   r"                aboutOpenedFromSettings = true;\n                hideSettingsPanel\(\);\n"
+                   r"                showAboutOverlay\(\);\n                break;\n", "activation"),
+                  (r"    private static final int SR_ABOUT\s*= 6;[^\n]*\n", "row id"),
+                  (r"            case SR_ABOUT:\s+return R\.string\.settings_row_about;\n", "row label"),
+              ]
+              for pat, label in pats:
+                  src = sub_once(src, pat, "", "about: " + label)
+              src = sub_once(src, r"default:(\s+)return R\.string\.settings_row_about;",
+                             lambda m: "default:" + m.group(1) + "return R.string.settings_row_privacy;",
+                             "about: default label")
+              return src
+
+
           def main():
               src = read(ACT)
               if "PinLock." in src:
                   print("Patch already applied - nothing to do.")
                   return
               braces_before = src.count("{") - src.count("}")
+
+              # 0) About screen: delete it completely ----------------------------------------
+              src = remove_about(src)
 
               # 1) ids ------------------------------------------------------------
               src = sub_once(
@@ -775,6 +955,7 @@ jobs:
               private static final int SR_FOCUS_RING     = 20;
               private static final int SR_FOCUS_COLOR    = 21;
               private static final int SR_CORNER         = 22;
+              private static final int SR_PIN_STYLE      = 23;
           ''', "row ids")
               src = sub_once(
                   src, r"SPAGE_MAIN = 0, SPAGE_WALLPAPER = 1, SPAGE_BACKUP = 2;",
@@ -794,11 +975,11 @@ jobs:
               src = sub_once(
                   src, r"(    private static final int\[\] SROWS_WALLPAPER = \{)",
                   lambda m: r'''    private static final int[] SROWS_PRIVACY = {
-                      SR_PIN, SR_HIDE_APPS, SR_SETTINGS_LOCK };
+                      SR_PIN, SR_PIN_STYLE, SR_HIDE_APPS, SR_SETTINGS_LOCK };
               private static final int[] SROWS_CUSTOM = {
                       SR_KEYMAP, SR_WALLPAPER_MENU, SR_CLOCK, SR_FOCUS_RING, SR_FOCUS_COLOR, SR_CORNER };
               private static final int[] SROWS_OTHER = {
-                      SR_BACKUP_MENU, SR_SYSTEM, SR_ABOUT };
+                      SR_BACKUP_MENU, SR_SYSTEM };
           ''' + m.group(1), "new page arrays")
               src = sub_once(
                   src, r"(            case SPAGE_WALLPAPER: return SROWS_WALLPAPER;\n)",
@@ -819,6 +1000,7 @@ jobs:
                       case SR_FOCUS_RING:         return R.string.settings_row_focus_ring;
                       case SR_FOCUS_COLOR:        return R.string.settings_row_focus_color;
                       case SR_CORNER:             return R.string.settings_row_corner;
+                      case SR_PIN_STYLE:          return R.string.settings_row_pin_style;
           ''', "row labels")
 
               # 4) state indicators for PIN / settings lock ------------------------------
@@ -828,7 +1010,8 @@ jobs:
                                          "            || rowId == SR_SETTINGS_LOCK\n"
                                          "            || rowId == SR_FOCUS_RING\n"
                                          "            || rowId == SR_FOCUS_COLOR\n"
-                                         "            || rowId == SR_CORNER\n",
+                                         "            || rowId == SR_CORNER\n"
+                                         "            || rowId == SR_PIN_STYLE\n",
                   "indicator rows")
               src = sub_once(
                   src, r'(            case SR_SLIDESHOW_FOLDER:   return "Not set";\n)',
@@ -837,6 +1020,7 @@ jobs:
                       case SR_FOCUS_RING:         return "Kapal\u0131";
                       case SR_FOCUS_COLOR:        return "A\u00e7\u0131k ye\u015fil";
                       case SR_CORNER:             return "< 30% >";
+                      case SR_PIN_STYLE:          return "< Modern >";
           ''', "indicator widest text")
               src = sub_once(
                   src,
@@ -859,6 +1043,9 @@ jobs:
                               ind.setTextColor(sel ? selTx : RING_COLORS[rcIdx]);
                           } else if (rowId == SR_CORNER) {
                               ind.setText("< " + cornerPct() + "% >");
+                              ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
+                          } else if (rowId == SR_PIN_STYLE) {
+                              ind.setText(PinLock.isModern(prefs) ? "< Modern >" : "< Klasik >");
                               ind.setTextColor(sel ? selTx : 0xFF7DD3FC);
           ''' + m.group(1), "indicator refresh")
 
@@ -922,6 +1109,9 @@ jobs:
                       case SR_CORNER:
                           stepCorner(+1, true);
                           break;
+                      case SR_PIN_STYLE:
+                          togglePinStyle();
+                          break;
           '''
               src = sub_once(src, old_case, lambda m: new_case, "SR_HIDE_APPS action")
 
@@ -972,6 +1162,12 @@ jobs:
                   if (rv != null) rv.setCorner(tileCornerPx);
                   RecyclingShelfView s = shelf;
                   if (s != null) applyShelfApps(s);
+              }
+
+              /** PIN screen style: modern (default) <-> classic. */
+              private void togglePinStyle() {
+                  prefs.edit().putInt("pin_style", PinLock.isModern(prefs) ? 0 : 1).apply();
+                  refreshSettingsRows();
               }
 
               private void stepRingColor(int dir) {
@@ -1115,12 +1311,14 @@ jobs:
               src = sub_once(
                   src, r"(                else if \(rowId == SR_IDLE_HIDE\) stepIdleHide\(-1\);)",
                   lambda m: m.group(1) + "\n                else if (rowId == SR_CORNER) stepCorner(-1, false);"
-                                         "\n                else if (rowId == SR_FOCUS_COLOR) stepRingColor(-1);",
+                                         "\n                else if (rowId == SR_FOCUS_COLOR) stepRingColor(-1);"
+                                         "\n                else if (rowId == SR_PIN_STYLE) togglePinStyle();",
                   "left key")
               src = sub_once(
                   src, r"(                else if \(rowId == SR_IDLE_HIDE\) stepIdleHide\(\+1\);)",
                   lambda m: m.group(1) + "\n                else if (rowId == SR_CORNER) stepCorner(+1, false);"
-                                         "\n                else if (rowId == SR_FOCUS_COLOR) stepRingColor(+1);",
+                                         "\n                else if (rowId == SR_FOCUS_COLOR) stepRingColor(+1);"
+                                         "\n                else if (rowId == SR_PIN_STYLE) togglePinStyle();",
                   "right key")
               # tile corner follows the setting (default 20 % = the original look)
               src = sub_once(
@@ -1271,6 +1469,15 @@ jobs:
                                 lambda m: "checkReleaseBuilds" + m.group(1) + "=" + m.group(2) + "false",
                                 "lint on release builds")
               write(gradle_path, gradle)
+              # QrCode.java was only used by the About screen
+              import os
+              if os.path.exists(QRC):
+                  os.remove(QRC)
+              # smaller / tighter dex (the app uses no reflection)
+              pro = read(PRO)
+              if "-allowaccessmodification" not in pro:
+                  pro += "\n-allowaccessmodification\n-repackageclasses ''\n"
+                  write(PRO, pro)
               write(ACT, src)
               write(STR, STRINGS_TR)
               write(PIN, PIN_LOCK_JAVA)
